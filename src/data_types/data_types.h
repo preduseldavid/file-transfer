@@ -19,7 +19,7 @@
 #define SOCKET int32_t
 #endif /* UNIX */
 
-/* operations between peers (flags) */
+/** operations between peers (flags) */
 typedef enum {
     START_TRANSFER         = 0x001,
     ABORT_TRANSFER         = 0x002,
@@ -43,12 +43,24 @@ typedef union {
     char        str[sizeof(flag_t)];
 } flag_union;
 
-/* network packets between peers */
+/** network packets between peers */
 typedef struct {
     uint32_t    size;
     flag_union  flags;
     char        *data;
 } net_packet_t;
+
+/** Threads communication mechanism */
+typedef struct {
+    volatile int lock;
+    volatile int action;
+} TC_t;
+
+typedef enum {
+    ALLOW_ACTION        = 0x001,
+    DENY_ACTION         = 0x002,
+    WAITING_ACTION      = 0x004
+} action_t;
 
 /* functions */
 EXTERN int8_t send_packet(SOCKET sock_desc, char *buff, uint32_t size, flag_t flags);

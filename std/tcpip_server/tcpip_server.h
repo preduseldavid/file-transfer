@@ -38,7 +38,7 @@ typedef struct {
     #else
     SOCKET              socket;
     #endif /* UNIX */
-    void*               callback_on_accept;
+    void                *callback_on_accept;
     int8_t              state;
     uint8_t             port;
     pthread_t           listen_TID;

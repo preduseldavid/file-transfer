@@ -18,6 +18,7 @@
 
 /* send functions */
 EXTERN int8_t __send(SOCKET sock_desc, char *path);
+EXTERN void abort_transfer(SOCKET sock_desc, int8_t *abortion_var, int8_t send_abortion);
 
 #undef EXTERN
 #endif /* SEND_H */

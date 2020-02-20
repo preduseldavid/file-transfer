@@ -1,17 +1,19 @@
 /**
- * @file tcpip_server_linux.c
- * @brief The implementation file of TCP/IP unix server
+ * @file tcpip_server_win.c
+ * @brief The implementation file of TCP/IP windows server
  */
 
 #define TCPIP_SERVER_C
+#undef UNICODE
 
-#include <stdio.h>
+#define WIN32_LEAN_AND_MEAN
+
+#include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netdb.h>
+#include <stdio.h>
+#include <pthread.h>
 
 #include "tcpip_server.h"
 #include "error.h"
@@ -25,60 +27,71 @@ tcpip_server_t* tcpip_server_create(uint16_t port)
 {
     tcpip_server_t      *ret_server = NULL;
     struct              addrinfo hints;
-    struct              addrinfo *result, *rp;
-    int32_t             socketfd, s;
+    struct              addrinfo *result;
     char                buf[16];
+    WSADATA wsaData;
+    int iResult;
+    SOCKET ListenSocket = INVALID_SOCKET;
     
-    memset(&hints, 0, sizeof(struct addrinfo));
-    hints.ai_family = AF_INET;          /* Internet domain socket */
-    hints.ai_socktype = SOCK_STREAM;    /* Stream socket */
-    hints.ai_flags = AI_PASSIVE;        /* For wildcard IP address */
-    hints.ai_protocol = 0;              /* Any protocol */
-    hints.ai_canonname = NULL;
-    hints.ai_addr = NULL;
-    hints.ai_next = NULL;
+    /* Initialize Winsock */
+    iResult = WSAStartup(MAKEWORD(2,2), &wsaData);
+    if (iResult != 0) {
+        ERROR("WSAStartup", "MAKEWORD(2,2)", ERROR_WSA);
+        return NULL;
+    }
     
-    errno = 0;
+    ZeroMemory(&hints, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_protocol = IPPROTO_TCP;
+    hints.ai_flags = AI_PASSIVE;
+    
+    /* Resolve the server address and port */
     sprintf(buf, "%d", port);
-    if (errno) {
-        ERROR("sprintf", "", ERROR_OS);
+    iResult = getaddrinfo(NULL, buf, &hints, &result);
+    if ( iResult != 0 ) {
+        ERROR("getaddrinfo", buf, ERROR_WSA);
+        WSACleanup();
         return NULL;
     }
-    s = getaddrinfo(NULL, buf, &hints, &result);
-    if (s != 0) {
-        errno = s;
-        ERROR("getaddrinfo", "", ERROR_OS);
+
+    /* Create a SOCKET for connecting to server */
+    ListenSocket = socket(result->ai_family, result->ai_socktype, result->ai_protocol);
+    if (ListenSocket == INVALID_SOCKET) {
+        ERROR("socket", "", ERROR_WSA);
+        freeaddrinfo(result);
+        WSACleanup();
         return NULL;
     }
-    /* getaddrinfo() returns a list of address structures.
-     *                          Try each address until we successfully bind(2).
-     *                          If socket(2) (or bind(2)) fails, we (close the socket
-     *                          and) try the next address. */
-    for (rp = result; rp != NULL; rp = rp->ai_next) {
-        socketfd = socket(rp->ai_family, rp->ai_socktype,
-                          rp->ai_protocol);
-        if (socketfd == -1)
-            continue;
-        int enable = 1;
-        if (setsockopt(socketfd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-            ERROR("setsockopt", "SO_REUSEADDR", ERROR_OS);
-            close(socketfd);
-            continue;
-        }
-        if (setsockopt(socketfd, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(int)) < 0) {
-             ERROR("setsockopt", "SO_KEEPALIVE", ERROR_OS);
-            close(socketfd);
-            continue;
-        }
-        if (bind(socketfd, rp->ai_addr, rp->ai_addrlen) == 0)
-            break;                  /* Success */
-        close(socketfd);
-    }
-    freeaddrinfo(result);           /* No longer needed */
-    if (rp == NULL) {               /* No address succeeded */
-        ERROR("bind", "", ERROR_OS);
+    
+    /* Setup the listening socket */
+    int enable = 1;
+    if (setsockopt(ListenSocket, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        ERROR("setsockopt", "SO_REUSEADDR", ERROR_WSA);
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
         return NULL;
     }
+    if (setsockopt(ListenSocket, SOL_SOCKET, SO_KEEPALIVE, &enable, sizeof(int)) < 0) {
+        ERROR("setsockopt", "SO_KEEPALIVE", ERROR_WSA);
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return NULL;
+    }
+    
+    /* Bind the socket */
+    iResult = bind( ListenSocket, result->ai_addr, (int)result->ai_addrlen);
+    if (iResult == SOCKET_ERROR) {
+        ERROR("bind", buf, ERROR_WSA);
+        freeaddrinfo(result);
+        closesocket(ListenSocket);
+        WSACleanup();
+        return NULL;
+    }
+    freeaddrinfo(result);
+    
     ret_server = (tcpip_server_t*) malloc(sizeof(tcpip_server_t));
     if (!ret_server) {
         ERROR("malloc", "", ERROR_OS);
@@ -87,7 +100,7 @@ tcpip_server_t* tcpip_server_create(uint16_t port)
     
     ret_server->state = UNINITIALIZED;
     ret_server->port = port;
-    ret_server->socket = socketfd;
+    ret_server->socket = ListenSocket;
     ret_server->callback_on_accept = NULL;
     ret_server->listen_TID = -1;
     
@@ -126,7 +139,7 @@ int32_t tcpip_server_destroy(tcpip_server_t* server)
     if (s == -1) {
         return -1;
     }
-    s = close(server->socket);
+    s = closesocket(server->socket);
     if (s != 0) {
         return -1;
     }
@@ -209,7 +222,7 @@ static void thread_accept_connections(tcpip_server_t* server)
         if (!client_socket || !client_addr) {
             /* errno is setted by malloc */
             ERROR("malloc", "", ERROR_OS);
-            close(sock);
+            closesocket(sock);
             free(client_socket);
             free(client_addr);
             pthread_exit(NULL);

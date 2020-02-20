@@ -1,0 +1,9 @@
+{
+  "name": "beSpontan"
+, "files": [ {"directory": ["*."] } ]
+, "build": {
+    "directory": "build"
+  , "build": "make all"
+  , "clean": "make clean"
+  }
+}

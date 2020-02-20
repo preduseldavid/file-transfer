@@ -65,7 +65,9 @@ STD_DIR         := std
 MODULES_SRC         := main \
                        send \
                        receive \
-                       data_types
+                       receive_file \
+                       data_types \
+                       user_thread
                        
 MODULES_STD	    := tcpip_server \
 		       error
@@ -101,11 +103,27 @@ receive.o               := receive.c \
 receive.dep             := $(addprefix $(SRC_DIR)/receive/, $(receive.o))
 
 #------------------------------------------------------------------------------
+# receive_file module 
+#------------------------------------------------------------------------------
+receive_file            := receive_file.o
+receive_file.o          := $(subst OS_SUFFIX,$(OS_SUFFIX), receive_file_OS_SUFFIX.h) \
+                           $(subst OS_SUFFIX,$(OS_SUFFIX), receive_file_OS_SUFFIX.c)
+receive_file.dep        := $(addprefix $(SRC_DIR)/receive_file/, $(receive_file.o))
+
+#------------------------------------------------------------------------------
 # main module 
 #------------------------------------------------------------------------------
 main                    := main.o
 main.o                  := main.c
 main.dep                := $(addprefix $(SRC_DIR)/main/, $(main.o))
+
+#------------------------------------------------------------------------------
+# user_thread module 
+#------------------------------------------------------------------------------
+user_thread             := user_thread.o
+user_thread.o           := user_thread.c \
+                           user_thread.h
+user_thread.dep         := $(addprefix $(SRC_DIR)/user_thread/, $(user_thread.o))
 
 #==============================================================================
 # STANDARD modules
@@ -152,6 +170,7 @@ endif
 # !!!DO NOT MODIFY THE SECTION BELOW !!!
 #------------------------------------------------------------------------------
 INC             := $(addprefix -I$(INC_DIR)/,$(INCLUDES))
+CONFIG_DIR	:= config
 
 LIB_DIRS        := $(addprefix -L$(LIB_DIR)/, $(LIBRARIES_DIRS))
 LIB_FILES       := $(addprefix -l, $(LIBRARIES_FILES))
@@ -171,7 +190,7 @@ $(TARGET): $(OBJECTS)
 	$(CC) $^ -o $(BIN_DIR)/$@ $(LIB_DIRS) $(LIB_FILES)
 
 $(BUILD_DIR)/%.o: $($(subst .o,.dep,$(notdir $@)))
-	$(CC) $(CFLAGS) $(INC) $(INC_DEP) $(filter %.c, $($(subst .o,.dep,$(notdir $@)))) -o $(BUILD_DIR)/$*.o 
+	$(CC) -I$(CONFIG_DIR) $(CFLAGS) $(INC) $(INC_DEP) $(filter %.c, $($(subst .o,.dep,$(notdir $@)))) -o $(BUILD_DIR)/$*.o 
 
 ifeq ($(OS_FAMILY),WIN)
 clean: 

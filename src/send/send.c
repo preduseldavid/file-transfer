@@ -20,9 +20,11 @@
 #include <netinet/tcp.h>
 #include <netinet/in.h>
 #include <dirent.h>
+#include <time.h>
 #endif /* UNIX */
 
 #define SEND_C
+#include "config.h"
 #include "send.h"
 #include "data_types.h"
 #include "error.h"
@@ -30,7 +32,6 @@
 /* internal functions' prototypes */
 static int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node);
 static int8_t send_file(SOCKET sock_desc, char *path);
-static void   abort_transfer(SOCKET sock_desc);
 
 /* internal variables */
 static int32_t send_directory_prefix_len;
@@ -42,10 +43,13 @@ int8_t __send(SOCKET sock_desc, char *path)
     flag_union  flag;
     struct stat statbuf;
     
+    /* Reset the abortion */
+    aborted_transfer = 0;
+    
     /* the sending path is a regular file or a directory? */
     if (stat(path, &statbuf) == -1) {
         ERROR("stat", path, ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         return -1;
     }
     
@@ -53,29 +57,29 @@ int8_t __send(SOCKET sock_desc, char *path)
     char *main_dir = strrchr(path, '/') + 1;
     send_directory_prefix_len = strlen(path) - strlen(main_dir);
     
-    flag.val = START_TRANSFER;
+    flag.val = START_TRANSFER | SEND_OPERATION;
     if (send_packet(sock_desc, NULL, 0, flag.val) == -1)
         return -1;
     
     if (S_ISDIR(statbuf.st_mode)) {
         s = send_directory(sock_desc, path, 1);
-        fprintf(stderr, "%d\n", s);
     }
     else if (S_ISREG(statbuf.st_mode)) {
         s = send_file(sock_desc, path);
     }
-    if (s == -1)
-        return -1;
     
-    flag.val = END_TRANSFER;
-    if (send_packet(sock_desc, NULL, 0, flag.val) == -1)
-        return -1;
-    
-    return 0;
+    if (s != -1) {
+        flag.val = END_TRANSFER;
+        if (send_packet(sock_desc, NULL, 0, flag.val) == -1)
+            s = -1;
+    }
+    fprintf(stdout, "End transfering...\n");
+    fflush(stdout);
+    return s;
 }
 
 /** 
- * Unsafe @function, it @is @recursive (but not tail recursive) and risks a stack overflow
+ * Unsafe @function, it is @recursive (but not tail recursive) and risks a stack overflow
  * To avoid it, path size must be a finite number
  */
 int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node)
@@ -92,13 +96,13 @@ int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node)
     dir = opendir(dirpath);
     if (!dir) {
         ERROR("opendir", dirpath, ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         return -1;
     }
     entry = readdir(dir);
     if (!entry) {
-        ERROR("readdir", "", ERROR_OS);
-        abort_transfer(sock_desc);
+        ERROR("readdir", dirpath, ERROR_OS);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         return -1;
     }
     
@@ -109,7 +113,7 @@ int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node)
     s = send_packet(sock_desc, send_data, send_size, flag);
     if (s == -1) {
         closedir(dir);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         return -1;
     }
     
@@ -139,7 +143,7 @@ int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node)
     
     if (errno) {
         ERROR("readdir", dirpath, ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         s = -1;
     }
     
@@ -150,7 +154,8 @@ int8_t send_directory(SOCKET sock_desc, char *dirpath, int32_t node)
 int8_t send_file(SOCKET sock_desc, char *path)
 {
     int32_t     s;
-    uint64_t    remaining;
+    uint64_t    filesize;
+    uint64_t    total_sent;
     int64_t     sent;
     int32_t     file_desc = -1;
     int         on = 1;
@@ -159,17 +164,20 @@ int8_t send_file(SOCKET sock_desc, char *path)
     off_t       offset;
     flag_t      flag = 0;
     
+    fprintf(stdout, "Sending %s ...\n", path);
+    fflush(stdout);
+    
     /* open the file to be sent */
     file_desc = open(path, O_RDONLY);
     if (file_desc == -1) {
         ERROR("open", path, ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         goto error;
     }
     
     /* send the file path of the file (starting from the sending directory offset) */
     flag = FILE_TYPE;
-    s = send_packet(sock_desc, &path[send_directory_prefix_len], 
+    s = send_packet(sock_desc, &path[send_directory_prefix_len],
                 strlen(&path[send_directory_prefix_len]), flag);
     if (s == -1) {
         goto error;
@@ -177,7 +185,7 @@ int8_t send_file(SOCKET sock_desc, char *path)
     /* send the file size */
     if (fstat(file_desc, &stat_buf) == -1) {
         ERROR("fstat", path, ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         goto error;
     }
     flag |= FILE_SIZE;
@@ -189,26 +197,27 @@ int8_t send_file(SOCKET sock_desc, char *path)
     /* employ TCP_CORK option to tune performance */
     if (setsockopt(sock_desc, IPPROTO_TCP, TCP_CORK, (void *) &on, sizeof(on)) == -1) {
         ERROR("setsockopt", "TCP_CORK, on", ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         goto error;
     }
     /* begin the transfer using sendfile */
     offset = 0;
-    remaining = stat_buf.st_size;
-    while (remaining) {
-        sent = sendfile(sock_desc, file_desc, (void *) &offset, remaining);
+    filesize = stat_buf.st_size;
+    total_sent = 0;
+    while (total_sent < filesize) {
+        sent = sendfile(sock_desc, file_desc, (void *) &offset, filesize - total_sent);
         if (sent == -1) {
             ERROR("sendfile", path, ERROR_OS);
-            abort_transfer(sock_desc);
+            abort_transfer(sock_desc, &aborted_transfer, 1);
             goto error;
         }
-        remaining -= sent;
+        total_sent += sent;
     }
     
     /* to ensure all waiting data is sent, TCP_CORK must be removed */
     if (setsockopt(sock_desc, IPPROTO_TCP, TCP_CORK, &off, sizeof(off)) == -1) {
         ERROR("setsockopt", "TCP_CORK, off", ERROR_OS);
-        abort_transfer(sock_desc);
+        abort_transfer(sock_desc, &aborted_transfer, 1);
         goto error;
     }
     /* SUCCESS transfer */
@@ -219,14 +228,16 @@ int8_t send_file(SOCKET sock_desc, char *path)
     return -1;
 }
 
-static void abort_transfer(SOCKET sock_desc)
+void abort_transfer(SOCKET sock_desc, int8_t *abortion_var, int8_t send_abortion)
 {
     /* 
-     * We got an error (a system call error or a TCP/IP error).
-     * Try silently to send an abortion to the socket. If this fail, it means
-     * it was a TCP/IP error
+     * We got an error (a system call error, a TCP/IP error or an abortion flag).
+     * If the peer sent me an abortion, just set the variable and exit. Else if we got
+     * an error, try to send an abortion flag to my peer
      */
-    aborted_transfer = 1;
+    if (abortion_var != NULL)
+        *abortion_var = 1;
+    if (send_abortion) {
 #ifdef PRINT_ERROR_ENABLED
 #undef PRINT_ERROR_ENABLED
 #define ENABLE_PRINT
@@ -236,6 +247,7 @@ static void abort_transfer(SOCKET sock_desc)
 #define PRINT_ERROR_ENABLED
 #undef ENABLE_PRINT
 #endif /* ENABLE_PRINT */
+    }
 }
 
 #undef SEND_C

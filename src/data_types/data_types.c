@@ -12,9 +12,10 @@
 #define DATA_TYPES_C
 #include "data_types.h"
 #include "error.h"
+#include "config.h"
 
 /* internal functions' prototypes */
-static uint32_t char_to_uint32(char *buff);
+inline static uint32_t char_to_uint32(char *buff);
 
 int8_t send_packet(SOCKET sock_desc, char *buff, uint32_t size, flag_t flags)
 {
@@ -45,7 +46,7 @@ int8_t send_packet(SOCKET sock_desc, char *buff, uint32_t size, flag_t flags)
 }
 
 net_packet_t *recv_packet(SOCKET sock_desc, int recv_flags)
-{
+{   
     net_packet_t *packet = (net_packet_t *) malloc(sizeof(net_packet_t));
     char         header[NET_PACKET_HEADER_SIZE + 1];
     uint32_t     remaining;
@@ -55,9 +56,10 @@ net_packet_t *recv_packet(SOCKET sock_desc, int recv_flags)
     memset(header, 0, sizeof(header));
     /* Receive the header */
     errno = 0;
-    if (recv(sock_desc, header, sizeof(header) - 1, recv_flags) == -1) {
+    if (recv(sock_desc, header, sizeof(header) - 1, recv_flags) <= 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
             errno = 0;
+            memset(header, 0, sizeof(header));
         }
         else {
             ERROR("recv", "", ERROR_OS);
@@ -71,10 +73,17 @@ net_packet_t *recv_packet(SOCKET sock_desc, int recv_flags)
     remaining = packet->size;
     
     /* Receive the data */
+    errno = 0;
     while (remaining > 0) {
-        if ((recv_size = recv(sock_desc, data, packet->size, recv_flags)) == -1) {
-            ERROR("recv", "", ERROR_OS);
-            goto error;
+        if ((recv_size = recv(sock_desc, data, packet->size, recv_flags)) <= 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                errno = 0;
+                break;
+            }
+            else {
+                ERROR("recv", "", ERROR_OS);
+                goto error;
+            }
         }
         remaining -= recv_size;
         data += recv_size;
@@ -97,7 +106,7 @@ void destroy_packet(net_packet_t *packet)
     packet = NULL;
 }
 
-static uint32_t char_to_uint32(char *buff)
+inline static uint32_t char_to_uint32(char *buff)
 {
     uint32_t val;
     memcpy(&val, buff, sizeof(val));

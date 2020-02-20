@@ -1,0 +1,4 @@
+TODO: 	test TCPIP_KEEP_ALIVE
+	check for memory leaks with valgrind
+	make the sockets nonblocking
+	print the reason why conection closed/was aborted
